@@ -27,7 +27,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * SparkTool to produce small FASTQs of reads sharing kmers with putative SV breakpoints for local assembly.
+ * SparkTool to identify putative SV breakpoints for local assembly.
  */
 @CommandLineProgramProperties(summary="Produce FASTQs of breakpoint candidates",
         oneLineSummary="Produce small FASTQs of reads sharing kmers with putative SV breakpoints for local assembly",
@@ -42,10 +42,9 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
     /**
      * This is a path to a file of kmers that appear too frequently in the reference to be usable as probes to localize
      * reads.  We don't calculate it here, because it depends only on the reference.
-     * The program FindBadGenomicKmers can produce such a list for you.
+     * The program FindBadGenomicKmersSpark can produce such a list for you.
      */
-    @Argument(doc = "file containing ubiquitous kmer list", shortName = "KS", fullName = "kmersToIgnore",
-            optional = false)
+    @Argument(doc = "file containing ubiquitous kmer list", shortName = "KS", fullName = "kmersToIgnore", optional = false)
     private String kmersToIgnoreFilename;
 
     @Override
@@ -61,6 +60,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
             throw new GATKException("The BAM must be coordinate sorted.");
         }
 
+
         // Process the input data to produce a map of SVKmer -> List of breakpoint IDs.
         // (A breakpoint ID is just an arbitrary identifier for the putative breakpoint.)
         // See the doc for findClusters to see a description of how this big Spark pipeline works.
@@ -73,7 +73,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
                     !read.isSecondaryAlignment() && !read.isSupplementaryAlignment() &&
                     !read.isDuplicate() && !read.failsVendorQualityCheck())
             .mapPartitionsToPair(readItr ->
-                    new MapPartitioner<>(readItr,new ReadsForBreakpointFinder(broadcastMap.value())))
+                    new MapPartitioner<>(readItr, new ReadsForBreakpointFinder(broadcastMap.value())))
             .groupByKey()
             .foreach(tupl -> writeFastq(tupl._1, tupl._2.iterator(), outputDir));
     }
@@ -83,9 +83,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
      * Each line must be exactly SVConstants.KMER_SIZE characters long, and must match [ACGT]*.
      */
     @VisibleForTesting static Set<SVKmer> readKmersToIgnore( final File kmersToIgnoreFile ) {
-        // compute size of HashMap to provide a final load factor of 7/10 (a bit lower than default max which is 3/4)
-        final int nKmers = 10*(int)(kmersToIgnoreFile.length()/(SVConstants.KMER_SIZE+1))/7+1;
-        final Set<SVKmer> kmersToIgnore = new HashSet<>(nKmers);
+        final Set<SVKmer> kmersToIgnore = new HashSet<>(SVUtils.hashMapCapacity((int)(kmersToIgnoreFile.length()/(SVConstants.KMER_SIZE+1))));
 
         try ( final BufferedReader rdr = new BufferedReader(new FileReader(kmersToIgnoreFile)) ) {
             String line;
@@ -131,7 +129,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
             getUnfilteredReads()
                 .mapPartitionsWithIndex((partitionIdx, readItr) ->
                     new MapPartitioner<>(new MapPartitioner<>(readItr, new BreakpointClusterer()).iterator(),
-                            new ClusterKmerizer(partitionIdx,kmersToIgnore.value())).iterator(),
+                            new ClusterKmerizer(partitionIdx, kmersToIgnore.value())).iterator(),
                     false )
                 .mapToPair(tupl -> tupl)
                 .combineByKey(breakId -> { List<Long> ids = new ArrayList<>(1); ids.add(breakId); return ids; },
@@ -143,9 +141,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
 
         // turn the list of interesting Kmers and the set of putative breakpoints to which they belong into a map
 
-        // compute size of HashMap to provide a final load factor of 7/10 (a bit lower than default max which is 3/4)
-        final int hashMapSize = 10*readPullingKmers.size()/7 + 1;
-        final Map<SVKmer, List<Long>> readPullingMap = new HashMap<>(hashMapSize);
+        final Map<SVKmer, List<Long>> readPullingMap = new HashMap<>(SVUtils.hashMapCapacity(readPullingKmers.size()));
         for ( final Tuple2<SVKmer, List<Long>> tupl : readPullingKmers ) {
             readPullingMap.put(tupl._1, tupl._2);
         }
@@ -200,18 +196,16 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
      * Class assumes that all reads presented to it are mapped.
      */
     @VisibleForTesting static final class SplitReadDetector {
-        private static final int MIN_SOFT_CLIP_LEN = 30; // minimum length of an interesting soft clip
         private static final int MIN_INDEL_LEN = 25; // minimum length of an interesting indel
         private static final int SOFT_CLIP_LOCUS_WIDTH = 4; // uncertainty in event locus for soft clip
-        private static final byte MIN_QUALITY = 15; // minimum acceptable quality in a soft-clip window
 
         public EventLocus getLocusIfReadIsSplit( final GATKRead read, final long readId ) {
             final List<CigarElement> cigarElements = read.getCigar().getCigarElements();
-            if ( hasInitialSoftClip(cigarElements,read) ) {
+            if ( ReadClassifier.hasInitialSoftClip(cigarElements, read) ) {
                 return new EventLocus(read.getStart() - SOFT_CLIP_LOCUS_WIDTH / 2, SOFT_CLIP_LOCUS_WIDTH, readId);
             }
 
-            if ( hasFinalSoftClip(cigarElements,read) ) {
+            if ( ReadClassifier.hasFinalSoftClip(cigarElements, read) ) {
                 return new EventLocus(read.getEnd() - SOFT_CLIP_LOCUS_WIDTH / 2, SOFT_CLIP_LOCUS_WIDTH, readId);
             }
 
@@ -224,43 +218,11 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
                         return new EventLocus(locus - SOFT_CLIP_LOCUS_WIDTH / 2, SOFT_CLIP_LOCUS_WIDTH, readId);
                     }
                 }
-                if ( op.consumesReferenceBases() )
+                if ( op.consumesReferenceBases() ) {
                     locus += ele.getLength();
+                }
             }
             return null;
-        }
-
-        private static boolean hasInitialSoftClip( final List<CigarElement> cigarElements, final GATKRead read ) {
-            final ListIterator<CigarElement> itr = cigarElements.listIterator();
-            if ( !itr.hasNext() ) return false;
-
-            CigarElement firstEle = itr.next();
-            if ( firstEle.getOperator() == CigarOperator.HARD_CLIP && itr.hasNext() ) {
-                firstEle = itr.next();
-            }
-            return firstEle.getOperator() == CigarOperator.SOFT_CLIP &&
-                    firstEle.getLength() >= MIN_SOFT_CLIP_LEN &&
-                    isHighQualityRegion(read.getBaseQualities(), 0);
-        }
-
-        private static boolean hasFinalSoftClip( final List<CigarElement> cigarElements, final GATKRead read ) {
-            final ListIterator<CigarElement> itr = cigarElements.listIterator(cigarElements.size());
-            if ( !itr.hasPrevious() ) return false;
-
-            CigarElement lastEle = itr.previous();
-            if ( lastEle.getOperator() == CigarOperator.HARD_CLIP && itr.hasPrevious() ) {
-                lastEle = itr.previous();
-            }
-            return lastEle.getOperator() == CigarOperator.SOFT_CLIP &&
-                    lastEle.getLength() >= MIN_SOFT_CLIP_LEN &&
-                    isHighQualityRegion(read.getBaseQualities(), read.getLength() - lastEle.getLength());
-        }
-
-        private static boolean isHighQualityRegion( final byte[] quals, int idx ) {
-            for ( final int end = idx+MIN_SOFT_CLIP_LEN; idx != end; ++idx ) {
-                if ( quals[idx] < MIN_QUALITY ) return false;
-            }
-            return true;
         }
     }
 
@@ -413,7 +375,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
             return SVKmerizer.stream(read.getBases(), SVConstants.KMER_SIZE)
                 .map(kmer -> kmer.canonical(SVConstants.KMER_SIZE))
                 .filter(kmer -> !kmersToIgnore.contains(kmer))
-                .map(kmer -> new Tuple2<>(kmer,breakpointId))
+                .map(kmer -> new Tuple2<>(kmer, breakpointId))
                 .collect(Collectors.toCollection(() -> new ArrayList<>(nKmers)))
                 .iterator();
         }

@@ -6,5 +6,5 @@ package org.broadinstitute.hellbender.tools.spark.sv;
 public final class SVConstants {
     private SVConstants(){}
 
-    public static final int KMER_SIZE = 63;
+    public static final int KMER_SIZE = 51;
 }
