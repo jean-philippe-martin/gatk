@@ -15,12 +15,15 @@ import org.broadinstitute.hellbender.engine.filters.ReadFilter;
 import org.broadinstitute.hellbender.engine.filters.ReadFilterLibrary;
 import org.broadinstitute.hellbender.engine.spark.GATKSparkTool;
 import org.broadinstitute.hellbender.metrics.MetricsUtils;
+import org.broadinstitute.hellbender.metrics.MetricAccumulationLevel;
 import org.broadinstitute.hellbender.tools.picard.analysis.InsertSizeMetrics;
 import org.broadinstitute.hellbender.utils.R.RScriptExecutor;
 import org.broadinstitute.hellbender.utils.io.Resource;
 import org.broadinstitute.hellbender.utils.read.GATKRead;
 
 import java.io.File;
+import java.util.Set;
+import java.util.EnumSet;
 
 @CommandLineProgramProperties(
         summary        = "Program to collect insert size distribution information in SAM/BAM file(s)",
@@ -93,19 +96,18 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
               optional = true)
     public int MQPassingThreshold = 0;
 
-//    TODO
-//    @Argument(doc = "If set to non-zero value, only include reads with mate passing certain mapping quality threshold.",
-//              shortName = "Qm",
-//              fullName = "mateMQPassingThreshold",
-//              optional = true)
-//    public int mateMQPassingThreshold = 0;
+    @Argument(doc = "If set to non-zero value, only include reads with mate passing certain mapping quality threshold." +
+                    "If set to zero, reads with zero mapping quality will be included in calculating metrics.",
+              shortName = "Qm",
+              fullName = "mateMQPassingThreshold",
+              optional = true)
+    public int mateMQPassingThreshold = 0;
 
-//    @Argument(doc="The level(s) at which to accumulate metrics. Possible values are {SAMPLE, LIBRARY, READ GROUP}. " +
-//                  "Default: All reads.",
-//              shortName="LEVEL",
-//              fullName = StandardArgumentDefinitions.OUTPUT_LONG_NAME,
-//              optional = false)
-//    public Set<MetricAccumulationLevel> METRIC_ACCUMULATION_LEVEL = EnumSet.of(MetricAccumulationLevel.ALL_READS);
+    @Argument(doc="The level(s) at which to accumulate metrics. Possible values are {ALL_READS, SAMPLE, LIBRARY, READ GROUP}.",
+              shortName="LEVEL",
+              fullName = "MetricsAccumulationLevel",
+              optional = false)
+    public Set<MetricAccumulationLevel> METRIC_ACCUMULATION_LEVEL = EnumSet.of(MetricAccumulationLevel.ALL_READS);
 
     /**
      * Which end of a read pair to use for collecting insert size metrics.
@@ -114,7 +116,7 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
      *     and only first end if both are available
      */
     public enum UseEnd {
-        FIRST(1), SECOND(2);//, EITHER(0);
+        FIRST(1), SECOND(2);//TODO:, EITHER(0);
         private final int value;
         UseEnd(int value){
             this.value = value;
@@ -125,7 +127,7 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
     }
 
     @Argument(doc = "Which end of pairs to use for collecting information. " +
-                    "Possible values:{FIRST, SECOND, EITHER}." +
+                    "Possible values:{FIRST, SECOND}." + //TODO: option EITHER is not supported yet
                     "Option EITHER picks up information from 1st end when both ends are available, " +
                     "and pick either end when only one end is available. " +
                     "(Remember, in SV analysis, a truncated region may be investigated, so this is possible.)",
@@ -138,24 +140,28 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
     private static final String R_SCRIPT = "insertSizeHistogram.R";
 
     @Override
-    protected void runTool(final JavaSparkContext ctx) {
+    public boolean requiresReads(){return true;}
+
+    @Override
+    public void runTool(final JavaSparkContext ctx) {
 
         final JavaRDD<GATKRead> filteredReads = getReads();
-
-        // Class where real metric-collection work is delegated to.
-        final InsertSizeMetricsCollectorSpark collector = new InsertSizeMetricsCollectorSpark(filteredReads,
-                                                                                              // METRIC_ACCUMULATION_LEVEL,
-                                                                                              getHeaderForReads().getReadGroups(),
-                                                                                              DEVIATIONS_TOL);
 
         final SAMFileHeader readsHeader = getHeaderForReads();
         final String inputFileName = getReadSourceName();
 
+        // Class where real metric-collection work is delegated to.
+        final InsertSizeMetricsCollectorSpark collector = new InsertSizeMetricsCollectorSpark(filteredReads,
+                                                                                              readsHeader,
+                                                                                              METRIC_ACCUMULATION_LEVEL,
+                                                                                              DEVIATIONS_TOL);
+
+        // similar to Picard::CollectInsertSizeMetrics.finish()
         if(OUTPUT != null) {
-            writeMetricsFile(collector, readsHeader, inputFileName);
+            writeMetricsFile(collector, inputFileName);
         }
         if(HISTOGRAM_PLOT_FILE != null){
-            writeHistogramPDF(readsHeader, inputFileName);
+            writeHistogramPDF(inputFileName);
         }
     }
 
@@ -177,7 +183,8 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
                                                                   !useDupReads,
                                                                   !useSecondaryAlignments,
                                                                   !useSupplementaryAlignments,
-                                                                  MQPassingThreshold);
+                                                                  MQPassingThreshold,
+                                                                  mateMQPassingThreshold);
 
         return alignmentAgreesWithHeader.and(pfilter).and(sfilter);
     }
@@ -219,30 +226,29 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
                                   final boolean filterDupReads,
                                   final boolean filterSecondaryAlignments,
                                   final boolean filterSupplementaryAlignments,
-                                  final int MQThreshold){
+                                  final int MQThreshold,
+                                  final int mMQThreshold){
 
-                final UseEnd endVal = whichEnd;
+            final UseEnd endVal = whichEnd;
 
-                ReadFilter tempFilter = read -> 0!=read.getFragmentLength();
-                           tempFilter = tempFilter.and(read -> read.isPaired());
-                           tempFilter = tempFilter.and(read -> endVal == (read.isFirstOfPair() ? UseEnd.FIRST : UseEnd.SECOND));
+            ReadFilter tempFilter = read -> 0!=read.getFragmentLength();
+                       tempFilter = tempFilter.and(read -> read.isPaired());
+                       tempFilter = tempFilter.and(read -> endVal == (read.isFirstOfPair() ? UseEnd.FIRST : UseEnd.SECOND));
 
-                if(filterNonProperlyPairdReads)   { tempFilter = tempFilter.and(read -> read.isProperlyPaired());}
-                if(filterUnmappedReads)           { tempFilter = tempFilter.and(read -> !read.isUnmapped());}
-                if(filterMateUnmappedReads)       { tempFilter = tempFilter.and(read -> !read.mateIsUnmapped());}
-                if(filterDupReads)                { tempFilter = tempFilter.and(read -> !read.isDuplicate());}
-                if(filterSecondaryAlignments)     { tempFilter = tempFilter.and(read -> !read.isSecondaryAlignment());}
-                if(filterSupplementaryAlignments) { tempFilter = tempFilter.and(read -> !read.isSupplementaryAlignment());}
+            if(filterNonProperlyPairdReads)   { tempFilter = tempFilter.and(read -> read.isProperlyPaired());}
+            if(filterUnmappedReads)           { tempFilter = tempFilter.and(read -> !read.isUnmapped());}
+            if(filterMateUnmappedReads)       { tempFilter = tempFilter.and(read -> !read.mateIsUnmapped());}
+            if(filterDupReads)                { tempFilter = tempFilter.and(read -> !read.isDuplicate());}
+            if(filterSecondaryAlignments)     { tempFilter = tempFilter.and(read -> !read.isSecondaryAlignment());}
+            if(filterSupplementaryAlignments) { tempFilter = tempFilter.and(read -> !read.isSupplementaryAlignment());}
 
-                if(0!=MQThreshold){ tempFilter = tempFilter.and(read -> read.getMappingQuality() >= MQThreshold);}
+            if(0!=MQThreshold)  { tempFilter = tempFilter.and(read -> read.getMappingQuality() >= MQThreshold);}
+            if(0!=mMQThreshold) { tempFilter = tempFilter.and(read -> read.getAttributeAsInteger("MQ") >= mMQThreshold);}
 
-                collapsedFilter = tempFilter;
+            collapsedFilter = tempFilter;
 
-                // TODO: efficiently checking mate mapping quality (may require index information)
-                // TODO: pick only isReverseStrand/mateIsReverseStrand (strand bias)
-                // TODO: case 0 of "whichEnd", most complicated since behavior depends on if mate is available in interesting region
-                // TODO: filter or not based on length==0
-                // TODO: filter based on MATE_ON_SAME_CONTIG MATE_DIFFERENT_STRAND GOOD_CIGAR NON_ZERO_REFERENCE_LENGTH_ALIGNMENT
+            // TODO: pick only isReverseStrand/mateIsReverseStrand (strand bias)
+            // TODO: filter based on {MATE_ON_SAME_CONTIG, MATE_DIFFERENT_STRAND, GOOD_CIGAR, NON_ZERO_REFERENCE_LENGTH_ALIGNMENT}
         }
 
         @Override
@@ -252,21 +258,21 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
     }
 
     @VisibleForTesting
-    void writeMetricsFile(final InsertSizeMetricsCollectorSpark collector, final SAMFileHeader readsHeader, final String inputFileName){
+    void writeMetricsFile(final InsertSizeMetricsCollectorSpark collector, final String inputFileName){
 
-        final MetricsFile<InsertSizeMetrics, Integer> metrics = getMetricsFile();
+        final MetricsFile<InsertSizeMetrics, Integer> metricsFile = getMetricsFile();
 
-        collector.produceMetricsFile(metrics);
+        collector.produceMetricsFile(metricsFile);
 
-        MetricsUtils.saveMetrics(metrics, OUTPUT, getAuthHolder());
+        MetricsUtils.saveMetrics(metricsFile, OUTPUT, getAuthHolder());
 
-        if (metrics.getAllHistograms().isEmpty()) {
+        if (metricsFile.getAllHistograms().isEmpty()) {
             logger.warn("No valid reads found in input file.");
         }
     }
 
     @VisibleForTesting
-    void writeHistogramPDF(final SAMFileHeader readsHeader, final String inputFileName){
+    void writeHistogramPDF(final String inputFileName){
 
         if(0.0 == DEVIATIONS_TOL){
             logger.warn("MAD tolerance for histogram set to 0, no plot to generate.");
@@ -274,16 +280,6 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
 
         final File histogramPlotPDF = new File(HISTOGRAM_PLOT_FILE);
         IOUtil.assertFileIsWritable(histogramPlotPDF);
-
-            /* Temporarily commented out because Picard R script for this purpose doesn't produce subtitle based on library
-            // If we're working with a single library, assign that library's name as a suffix to the plot title
-            final List<SAMReadGroupRecord> readGroups = readsHeader.getReadGroups();
-
-            //A subtitle for the plot, usually corresponding to a library.
-            String plotSubtitle = "";
-            if (readGroups.size() == 1) {
-                plotSubtitle = StringUtil.asEmptyIfNull(readGroups.get(0).getLibrary());
-            }*/
 
         final RScriptExecutor executor = new RScriptExecutor();
         executor.addScript(new Resource(R_SCRIPT, CollectInsertSizeMetricsSpark.class));

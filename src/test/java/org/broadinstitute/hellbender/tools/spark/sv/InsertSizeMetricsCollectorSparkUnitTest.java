@@ -1,10 +1,12 @@
 package org.broadinstitute.hellbender.tools.spark.sv;
 
+import htsjdk.samtools.util.Histogram;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Testing "long[] InsertSizeMetricsCollectorSparkUnitTest::computeRanges(final Map<Integer, Long>, final int, final double)",
@@ -15,7 +17,7 @@ public final class InsertSizeMetricsCollectorSparkUnitTest {
     @Test
     public void testRanges1() throws Exception {
 
-        final Map<Integer, Long> map = new HashMap<>();
+        final Map<Integer, Long> map = new TreeMap<>();
         map.put(36, 3L);
         map.put(38, 2L);
         map.put(40, 1L);
@@ -23,7 +25,13 @@ public final class InsertSizeMetricsCollectorSparkUnitTest {
         map.put(44, 2L);
         map.put(45, 1L);
 
-        long[] calculatedBinWidths = InsertSizeMetricsCollectorSpark.computeRanges(map, 41, 13);
+        Histogram<Integer> hist = new Histogram<>("dummy", "test");
+        for(final int size: map.keySet()){
+            hist.prefillBins(size);
+            hist.increment(size, map.get(size));
+        }
+
+        long[] calculatedBinWidths = InsertSizeMetricsCollectorSpark.computeRanges(hist, 41, 13);
         long[] expectedBinWidths = {1L, 1L, 1L, 7L, 7L, 7L, 9L, 11L, 11L, 11L};
         Assert.assertEquals(calculatedBinWidths, expectedBinWidths);
     }
