@@ -59,7 +59,7 @@ public final class CollectInsertSizeMetricsSparkUnitTest extends CommandLineProg
 
         // some filter options
         args.add("-" + "E");
-        args.add(CollectInsertSizeMetricsSpark.UseEnd.SECOND);
+        args.add(CollectInsertSizeMetricsSpark.EndToUse.SECOND);
 
         // accumulation level options (all included for better test coverage)
         args.add("-" + "LEVEL");

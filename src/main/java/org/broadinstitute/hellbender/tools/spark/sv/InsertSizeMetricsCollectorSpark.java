@@ -23,7 +23,6 @@ import java.io.Serializable;
  * Worker class to collect insert size metrics.
  * TODO: filter reads based on length value (if too large), and/or minimum_pct like in Picard.
  * TODO: is it desired that mapping quality is collected as well?
- * TODO: handle higher-case lower-case group name when asking for a particular group's stats
  */
 public final class InsertSizeMetricsCollectorSpark implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -38,10 +37,11 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
 
     // For MetricsAccumulationLevel.ALL_READS, its group name is set to the following level.
     // This is used only in the htsjdk Histogram title.
-    private static final String ALL_READS_KEY_MACRO = "All_reads";
+    private static final String ALL_READS_GROUP_NAME = "All_reads";
 
     /**
-     * Delegates actual work to utility functions.
+     * The constructor for the class where actual work of collection insert size statistics at the requested levels
+     *   are delegated to utility functions.
      *
      * @param filteredReads         reads that pass filters
      * @param header                header in the input
@@ -56,12 +56,16 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
         // construct untrimmed hand rolled "histogram" (SortedMap) in three steps, because htsjdk Histogram does not play well with Serialization
         // so first hand roll a histogram using Spark (read traversal is the bottleneck in terms of performance),
         //   when computing corresponding metrics locally, use htsjdk Histogram converted the sorted map version to do the work
-        final Map<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> unsortedHistogramsAtRGLevel = filteredReads.mapToPair(read -> step1ReadTraversal(read, header))
+        // it is called "unsorted because the groups are not ordered hierarchically
+        //   (e.g. it is not guaranteed that groups at SAMPLE level appear before groups at LIBRARY level)
+        final Map<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> unsortedHistogramsAtRGLevel = filteredReads.mapToPair(read -> step1ReadTraversalToExtractInfo(read, header))
                                                                                                                                     .groupByKey()
-                                                                                                                                    .mapToPair(InsertSizeMetricsCollectorSpark::step2ConvertToList)
-                                                                                                                                    .mapToPair(InsertSizeMetricsCollectorSpark::step3ConvertToHistogram)
+                                                                                                                                    .mapToPair(InsertSizeMetricsCollectorSpark::step2GroupUpSizesByOrientation)
+                                                                                                                                    .mapToPair(InsertSizeMetricsCollectorSpark::step3ConstructHistogram)
                                                                                                                                     .collectAsMap();
 
+        // now sort it hierarchically
+        final Comparator<GroupInfo> groupInfoComparator = makeGroupInfoComparator();
         final SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> histogramsAtRGLevel = new TreeMap<>(groupInfoComparator);
         histogramsAtRGLevel.putAll(unsortedHistogramsAtRGLevel);
 
@@ -71,35 +75,20 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
             listOfStats.addFirst(histogramsAtRGLevel);
         }
         if (accumLevels.contains(MetricAccumulationLevel.LIBRARY)) {
-            listOfStats.addFirst(levelUp(histogramsAtRGLevel, MetricAccumulationLevel.LIBRARY));
+            listOfStats.addFirst(accumulateHistogramsForHigherLevel(histogramsAtRGLevel, MetricAccumulationLevel.LIBRARY, groupInfoComparator));
         }
         if (accumLevels.contains(MetricAccumulationLevel.SAMPLE)) {
-            listOfStats.addFirst(levelUp(histogramsAtRGLevel, MetricAccumulationLevel.SAMPLE));
+            listOfStats.addFirst(accumulateHistogramsForHigherLevel(histogramsAtRGLevel, MetricAccumulationLevel.SAMPLE, groupInfoComparator));
         }
         if (accumLevels.contains(MetricAccumulationLevel.ALL_READS)) {
-            listOfStats.addFirst(levelUp(histogramsAtRGLevel, MetricAccumulationLevel.ALL_READS));
+            listOfStats.addFirst(accumulateHistogramsForHigherLevel(histogramsAtRGLevel, MetricAccumulationLevel.ALL_READS, groupInfoComparator));
         }
 
         int i=0;
         for(final SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> map : listOfStats){
-            histogramsAndMetrics.add( convertSortedMapToHTSHistogram(map, histogramMADTolerance) );
+            histogramsAndMetrics.add( convertSortedMapToHTSHistogram(map, histogramMADTolerance, groupInfoComparator) );
             for(final GroupInfo groupInfo : map.keySet()){ // auxiliary map
-                String name = "";
-                switch (groupInfo.level){
-                    case ALL_READS:
-                        name = ALL_READS_KEY_MACRO;
-                        break;
-                    case SAMPLE:
-                        name = groupInfo.sample;
-                        break;
-                    case LIBRARY:
-                        name = groupInfo.library;
-                        break;
-                    case READ_GROUP:
-                        name = groupInfo.readGroup;
-                        break;
-                }
-                mapFromGroupNameToIndexInList.put(name, i++);
+                mapFromGroupNameToIndexInList.put(getGroupName(groupInfo), i++);
             }
         }
     }
@@ -132,34 +121,34 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
      * @throws IllegalArgumentException
      */
     public Map<SamPairUtil.PairOrientation, InsertSizeMetrics> getMetrics(final String groupName) throws IllegalArgumentException {
-        final Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>> intermediate = getHistogramsAndMetrics(groupName);
-        Map<SamPairUtil.PairOrientation, InsertSizeMetrics> result = new HashMap<>();
-        for(Map.Entry<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>> entry : intermediate.entrySet()){
-            result.put(entry.getKey(), entry.getValue()._2());
+        final Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>> histogramAndMetrics = getHistogramsAndMetrics(groupName);
+        Map<SamPairUtil.PairOrientation, InsertSizeMetrics> metricsOnly = new HashMap<>();
+        for(Map.Entry<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>> entry : histogramAndMetrics.entrySet()){
+            metricsOnly.put(entry.getKey(), entry.getValue()._2());
         }
-        return result;
+        return metricsOnly;
     }
 
     /**
      * Utility getter for retrieving InsertSizeMetrics of a particular group, given its name and requested orientation of the pairs.
-     * If no read pairs are available in this particular group of the requested orientation, returns null.
+     * If no valid read pairs are available in this particular group of the requested orientation, returns null.
      * @param groupName   String representation of the group's name/id, whose InsertSizeMetrics information is requested.
      * @param orientation Requested orientation.
      * @return            InsertSizeMetrics of the requested group, of the requested orientation (could be null if no reads available)
      */
-    public InsertSizeMetrics getMetricsOfOrientation(final String groupName, final SamPairUtil.PairOrientation orientation){
+    public InsertSizeMetrics getMetricsByGroupNameAndOrientation(final String groupName, final SamPairUtil.PairOrientation orientation) throws IllegalArgumentException {
         return getMetrics(groupName).get(orientation);
     }
 
     /**
-     * Intermediate step worker function where higher level (library, sample, all_reads) hand-rolled histograms are
-     *     constructed by merging corresponding read_group level ones.
+     * Function where higher level (library, sample, all_reads) hand-rolled histograms are constructed from corresponding read_group level ones.
      * @param histogramsAtRGLevel  all hand-rolled histograms of all read groups
      * @param toLevel              level (library, sample, all_reads) on which histograms will be built
      * @return                     merged histogram for all available groups at the requested level
      */
-    private static SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> levelUp(final SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> histogramsAtRGLevel,
-                                                                                                      final MetricAccumulationLevel toLevel){
+    private static SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> accumulateHistogramsForHigherLevel(final SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> histogramsAtRGLevel,
+                                                                                                                                       final MetricAccumulationLevel toLevel,
+                                                                                                                                       final Comparator<GroupInfo> groupInfoComparator){
 
         SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> histogramsAtHigherLevel = new TreeMap<>(groupInfoComparator);
 
@@ -172,16 +161,16 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
                                                                  toLevel);
             // create if haven't seen this group yet, then merge
             histogramsAtHigherLevel.putIfAbsent(groupInfoAtThisLevel, new HashMap<>());
-            Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>> histList = histogramsAtHigherLevel.get(groupInfoAtThisLevel);
+            Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>> higherLevelHistogramList = histogramsAtHigherLevel.get(groupInfoAtThisLevel);
             for(final SamPairUtil.PairOrientation orientation : rgStats.getValue().keySet()){
                 final SortedMap<Integer, Long> rgHist = rgStats.getValue().get(orientation);
-                histList.putIfAbsent(orientation, new TreeMap<>());
-                SortedMap<Integer, Long> hist = histList.get(orientation);
-                for(Map.Entry<Integer, Long> entry : rgHist.entrySet()){
-                    hist.putIfAbsent(entry.getKey(), 0L);
-                    Long binSize = hist.get(entry.getKey());
-                    binSize += entry.getValue();
-                    hist.put(entry.getKey(), binSize);
+                higherLevelHistogramList.putIfAbsent(orientation, new TreeMap<>());
+                SortedMap<Integer, Long> higherLevelHistogram = higherLevelHistogramList.get(orientation);
+                for(Map.Entry<Integer, Long> rgHistBin : rgHist.entrySet()){
+                    higherLevelHistogram.putIfAbsent(rgHistBin.getKey(), 0L);
+                    Long count = higherLevelHistogram.get(rgHistBin.getKey());
+                    count += rgHistBin.getValue();
+                    higherLevelHistogram.put(rgHistBin.getKey(), count);
                 }
             }
         }
@@ -190,16 +179,17 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
 
     /**
      * Last step worker function where hand-rolled histograms (SortedMap) is converted to htsjdk Histograms, and metrics information is collected
-     * @param mapping                hand-rolled histogram
-     * @param histogramMADTolerance  tolerance to trim histogram so "outliers" don't ruin mean and SD values
-     * @return                       htsjdk Histogram and InsertSizeMetrics bundled together under particular pair orientations, for the same grouping that's fed in
+     * @param rawHistogramsByGroupInfoAndOrientation  hand-rolled histogram
+     * @param histogramMADTolerance                   tolerance to trim histogram so "outliers" don't ruin mean and SD values
+     * @return                                        htsjdk Histogram and InsertSizeMetrics bundled together under particular pair orientations, for the same grouping that's fed in
      */
-    private static SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>>> convertSortedMapToHTSHistogram(final SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> mapping,
-                                                                                                                                                  final double histogramMADTolerance){
+    private static SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>>> convertSortedMapToHTSHistogram(final SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> rawHistogramsByGroupInfoAndOrientation,
+                                                                                                                                                        final double histogramMADTolerance,
+                                                                                                                                                        final Comparator<GroupInfo> groupInfoComparator){
 
-        SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>>> converted = new TreeMap<>(groupInfoComparator);
+        SortedMap<GroupInfo, Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>>> statsSortedHierarchically = new TreeMap<>(groupInfoComparator);
 
-        for(final Map.Entry<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> groupStats : mapping.entrySet()){
+        for(final Map.Entry<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> groupStats : rawHistogramsByGroupInfoAndOrientation.entrySet()){
 
             final GroupInfo groupInfo = groupStats.getKey();
 
@@ -207,7 +197,7 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
 
                 final SamPairUtil.PairOrientation orientation = groupStatsOfAOrientation.getKey();
                 // convert to htsjdk Histogram
-                final Histogram<Integer> htsHist = new Histogram<>("insert_size", getGroupName(groupInfo) + orientationToString(orientation) + "_count");
+                final Histogram<Integer> htsHist = new Histogram<>("insert_size", getGroupName(groupInfo) + "." + orientationToString(orientation) + "_count");
                 final SortedMap<Integer, Long> hist = groupStatsOfAOrientation.getValue();
                 for(final int size : hist.keySet()){
                     htsHist.prefillBins(size);
@@ -225,11 +215,11 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
                 // save result
                 final Map<SamPairUtil.PairOrientation, Tuple2<Histogram<Integer>, InsertSizeMetrics>> mapToStats = new HashMap<>();
                 mapToStats.put(orientation, new Tuple2<>(htsHist, metrics));
-                converted.put(groupInfo, mapToStats);
+                statsSortedHierarchically.put(groupInfo, mapToStats);
             }
         }
 
-        return converted;
+        return statsSortedHierarchically;
     }
 
     // small utility function to collect MetricsBase information
@@ -250,7 +240,7 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
 
     // small utility function to collect bin width on the untrimmed Histogram, but actual work delegated to computeRanges
     private static void collectSymmetricBinWidth(final Histogram<Integer> hist, InsertSizeMetrics metrics){
-        long bin_widths[] = computeRanges(hist, (int) hist.getMedian(), metrics.READ_PAIRS); // metrics.REAR_PAIRS is assumed to be set properly already
+        final long bin_widths[] = computeRanges(hist, (int) hist.getMedian(), metrics.READ_PAIRS); // metrics.REAR_PAIRS is assumed to be set properly already
         metrics.WIDTH_OF_10_PERCENT = (int) bin_widths[0];
         metrics.WIDTH_OF_20_PERCENT = (int) bin_widths[1];
         metrics.WIDTH_OF_30_PERCENT = (int) bin_widths[2];
@@ -263,6 +253,7 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
         metrics.WIDTH_OF_99_PERCENT = (int) bin_widths[9];
     }
 
+    // Computes with of symmetrical bins around the histogram's median
     @VisibleForTesting
     @SuppressWarnings("unchecked") // suppress warning on type inference when calling hist.get(int)
     static long[] computeRanges(final Histogram<Integer> hist, final int start, final double totalCount){
@@ -316,7 +307,7 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
         String groupName = null;
         switch (groupInfo.level){
             case ALL_READS:
-                groupName = ALL_READS_KEY_MACRO;
+                groupName = ALL_READS_GROUP_NAME;
                 break;
             case SAMPLE:
                 groupName = groupInfo.sample;
@@ -328,27 +319,27 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
                 groupName = groupInfo.readGroup;
                 break;
         }
-        return (groupName + ".");
+        return groupName;
     }
 
-    private static String orientationToString(final SamPairUtil.PairOrientation OR){
-        return OR.equals(SamPairUtil.PairOrientation.FR) ? "fr" : (OR.equals(SamPairUtil.PairOrientation.RF) ? "rf" : "tandem");
+    private static String orientationToString(final SamPairUtil.PairOrientation orientation){
+        return orientation.equals(SamPairUtil.PairOrientation.FR) ? "fr" : (orientation.equals(SamPairUtil.PairOrientation.RF) ? "rf" : "tandem");
     }
 
     // utility functions to do mapping on RDDs; broken into three steps for easier comprehension
-    private static Tuple2<GroupInfo, Tuple2<SamPairUtil.PairOrientation, Integer>> step1ReadTraversal(final GATKRead read, final SAMFileHeader header){
+    private static Tuple2<GroupInfo, Tuple2<SamPairUtil.PairOrientation, Integer>> step1ReadTraversalToExtractInfo(final GATKRead read, final SAMFileHeader header){
         final GroupInfo readsGroupInfo = new GroupInfo(read, header, MetricAccumulationLevel.READ_GROUP);
         final Tuple2<SamPairUtil.PairOrientation, Integer> readsPairInfo = new Tuple2<>(SamPairUtil.getPairOrientation(read.convertToSAMRecord(header)), Math.abs(read.getFragmentLength()));
         return new Tuple2<>(readsGroupInfo, readsPairInfo);
     }
 
-    private static Tuple2<GroupInfo, Map<SamPairUtil.PairOrientation, List<Integer>>> step2ConvertToList(final Tuple2<GroupInfo, Iterable<Tuple2<SamPairUtil.PairOrientation, Integer>>> entry){
+    private static Tuple2<GroupInfo, Map<SamPairUtil.PairOrientation, List<Integer>>> step2GroupUpSizesByOrientation(final Tuple2<GroupInfo, Iterable<Tuple2<SamPairUtil.PairOrientation, Integer>>> entry){
         return new Tuple2<>(entry._1(), StreamSupport.stream(entry._2().spliterator(), false)
                                                      .collect(Collectors.groupingBy(Tuple2::_1,
                                                                                     Collectors.mapping(Tuple2::_2, Collectors.toList()))));
     }
 
-    private static Tuple2<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> step3ConvertToHistogram(final Tuple2<GroupInfo, Map<SamPairUtil.PairOrientation, List<Integer>>> entry){
+    private static Tuple2<GroupInfo, Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>>> step3ConstructHistogram(final Tuple2<GroupInfo, Map<SamPairUtil.PairOrientation, List<Integer>>> entry){
 
         final Map<SamPairUtil.PairOrientation, SortedMap<Integer, Long>> orientationToSortedMap = new HashMap<>();
 
@@ -376,62 +367,45 @@ public final class InsertSizeMetricsCollectorSpark implements Serializable {
         }
     }
 
-    private static int convertMetricLevelToInt(final MetricAccumulationLevel level){
-        int i=0;
-        switch (level){
-            case ALL_READS:
-                break;
-            case SAMPLE:
-                i=1;
-                break;
-            case LIBRARY:
-                i=2;
-                break;
-            case READ_GROUP:
-                i=3;
-                break;
-        }
-        return i;
-    }
+    private static Comparator<GroupInfo> makeGroupInfoComparator(){
 
-    private static Comparator<GroupInfo> groupInfoComparator = new Comparator<GroupInfo>() {
-        @Override public int compare(final GroupInfo g1, final GroupInfo g2) {
+        return new Comparator<GroupInfo>() {
+            @Override
+            public int compare(final GroupInfo g1, final GroupInfo g2) {
 
-            final int first  = convertMetricLevelToInt(g1.level);
-            final int second = convertMetricLevelToInt(g2.level);
-
-            if(first<second){       // g2 at finer level
-                return -1;
-            }else if(first>second){ // g1 at finer level
-                return 1;
-            }else{                  // if both are at the same level
-                if(1==first){       // if sample level
-                    return g1.sample.compareToIgnoreCase(g2.sample);
-                }else if(2==first){ // if library level, first compare sample names then compare library names
-                    int i = g1.sample.compareToIgnoreCase(g2.sample);
-                    if(0==i) {
-                        return g1.library.compareToIgnoreCase(g2.library);
-                    }else{
-                        return i;
-                    }
-                }else if(3==first){ // if RG level, compare sample, then library, then RG names
-                    int i = g1.sample.compareToIgnoreCase(g2.sample);
-                    if(0==i) {
-                        int j = g1.library.compareToIgnoreCase(g2.library);
-                        if(0==j){
-                            return g1.readGroup.compareToIgnoreCase(g2.readGroup);
-                        }else {
-                            return j;
+                if (g1.level.compareTo(g2.level) < 0) {       // g2 at finer level
+                    return -1;
+                } else if (g1.level.compareTo(g2.level) < 0) { // g1 at finer level
+                    return 1;
+                } else {                  // if both are at the same level
+                    if (g1.level.equals(MetricAccumulationLevel.SAMPLE)) {       // if sample level
+                        return g1.sample.compareToIgnoreCase(g2.sample);
+                    } else if (g1.level.equals(MetricAccumulationLevel.LIBRARY)) { // if library level, first compare sample names then compare library names
+                        int i = g1.sample.compareToIgnoreCase(g2.sample);
+                        if (0 == i) {
+                            return g1.library.compareToIgnoreCase(g2.library);
+                        } else {
+                            return i;
                         }
-                    }else{
-                        return i;
+                    } else if (g1.level.equals(MetricAccumulationLevel.READ_GROUP)) { // if RG level, compare sample, then library, then RG names
+                        int i = g1.sample.compareToIgnoreCase(g2.sample);
+                        if (0 == i) {
+                            int j = g1.library.compareToIgnoreCase(g2.library);
+                            if (0 == j) {
+                                return g1.readGroup.compareToIgnoreCase(g2.readGroup);
+                            } else {
+                                return j;
+                            }
+                        } else {
+                            return i;
+                        }
+                    } else {
+                        return 0;
                     }
-                }else{
-                    return 0;
                 }
             }
-        }
-    };
+        };
+    }
 }
 
 final class GroupInfo implements Serializable{

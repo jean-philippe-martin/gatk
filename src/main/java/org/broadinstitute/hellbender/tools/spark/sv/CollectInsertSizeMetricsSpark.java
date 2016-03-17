@@ -36,28 +36,28 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
               shortName = StandardArgumentDefinitions.OUTPUT_SHORT_NAME,
               fullName = StandardArgumentDefinitions.OUTPUT_LONG_NAME,
               optional = true)
-    public String OUTPUT = null;
+    public String output = null;
 
     @Argument(doc = "A local path to PDF file where histogram plot will be saved in.",
               shortName = "HIST",
               fullName = "HistogramPlotPDF",
               optional = true)
-    public String HISTOGRAM_PLOT_FILE = null;
+    public String histogramPlotFile = null;
 
-    @Argument(doc = "Generate mean, sd and plots by trimming the data down to MEDIAN + DEVIATIONS_TOL*MEDIAN_ABSOLUTE_DEVIATION. " +
+    @Argument(doc = "Generate mean, sd and plots by trimming the data down to MEDIAN + maxMADTolerance*MEDIAN_ABSOLUTE_DEVIATION. " +
                     "This is done because insert size data typically includes enough anomalous values from chimeras and other " +
                     "artifacts to make the mean and sd grossly misleading regarding the real distribution.",
               shortName = "TOL",
               fullName = "HistogramPlotDeviationsTolerance",
               optional = true)
-    public double DEVIATIONS_TOL = 10.0;
+    public double maxMADTolerance = 10.0;
 
     // read filtering criteria
     @Argument(doc = "If set to true, use pairs of reads that are not properly oriented.",
               shortName = "nPP",
               fullName = "useNonProperlyPairedReads",
               optional = true)
-    public boolean useNonProperlyPairedReads = false;
+    public boolean filterNonProperlyPairedReads = false;
 
     @Argument(doc = "If set to true, include unmapped reads as well.",
               shortName = "U",
@@ -91,15 +91,15 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
 
     @Argument(doc = "If set non-zero value, only include reads passing certain mapping quality threshold. " +
                     "If set to zero, reads with zero mapping quality will be included in calculating metrics.",
-              shortName = "Q",
-              fullName = "MQPassingThreshold",
+              shortName = "MAPQ",
+              fullName = "MAPQThreshold",
               optional = true)
     public int MQPassingThreshold = 0;
 
-    @Argument(doc = "If set to non-zero value, only include reads with mate passing certain mapping quality threshold." +
-                    "If set to zero, reads with zero mapping quality will be included in calculating metrics.",
-              shortName = "Qm",
-              fullName = "mateMQPassingThreshold",
+    @Argument(doc = "If set to non-zero value, only include reads with a mate mapping quality greater than the given value." +
+                    "If set to zero, reads will not be filtered based mate mapping quality",
+              shortName = "MQ",
+              fullName = "MQThreshold",
               optional = true)
     public int mateMQPassingThreshold = 0;
 
@@ -115,10 +115,10 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
      *     so third case is possible: will use either end when only one end is available in the region specified,
      *     and only first end if both are available
      */
-    public enum UseEnd {
+    public enum EndToUse {
         FIRST(1), SECOND(2);//TODO:, EITHER(0);
         private final int value;
-        UseEnd(int value){
+        EndToUse(int value){
             this.value = value;
         }
         public int getValue(){
@@ -134,13 +134,13 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
               shortName = "E",
               fullName = "whichEndOfPairToUse",
               optional = true)
-    public UseEnd useEnd = UseEnd.FIRST;
+    public EndToUse useEnd = EndToUse.FIRST;
 
     // path to Picard R script for producing histograms in PDF files.
     private static final String R_SCRIPT = "insertSizeHistogram.R";
 
     @Override
-    public boolean requiresReads(){return true;}
+    public boolean requiresReads(){ return true; }
 
     @Override
     public void runTool(final JavaSparkContext ctx) {
@@ -154,13 +154,12 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
         final InsertSizeMetricsCollectorSpark collector = new InsertSizeMetricsCollectorSpark(filteredReads,
                                                                                               readsHeader,
                                                                                               METRIC_ACCUMULATION_LEVEL,
-                                                                                              DEVIATIONS_TOL);
+                                                                                              maxMADTolerance);
 
-        // similar to Picard::CollectInsertSizeMetrics.finish()
-        if(OUTPUT != null) {
+        if(output != null) {
             writeMetricsFile(collector, inputFileName);
         }
-        if(HISTOGRAM_PLOT_FILE != null){
+        if(histogramPlotFile != null){
             writeHistogramPDF(inputFileName);
         }
     }
@@ -177,9 +176,7 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
         final PrimaryFilter pfilter = new PrimaryFilter();
 
         final SVCustomReadFilter sfilter = new SVCustomReadFilter(useEnd,
-                                                                  !useNonProperlyPairedReads,
-                                                                  !useUnmappedReads,
-                                                                  !useMateUnmappedReads,
+                                                                  filterNonProperlyPairedReads,
                                                                   !useDupReads,
                                                                   !useSecondaryAlignments,
                                                                   !useSupplementaryAlignments,
@@ -203,11 +200,12 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
                                            .and(ReadFilterLibrary.READLENGTH_EQUALS_CIGARLENGTH)
                                            .and(ReadFilterLibrary.SEQ_IS_STORED)
                                            .and(ReadFilterLibrary.CIGAR_IS_SUPPORTED)
-                                           .and(ReadFilterLibrary.MAPPING_QUALITY_AVAILABLE);
+                                           .and(ReadFilterLibrary.MAPPING_QUALITY_AVAILABLE)
+                                           .and(ReadFilterLibrary.MAPPED);
 
         @Override
         public boolean test(final GATKRead read){
-            return primary.test(read);
+            return primary.test(read) && (!read.mateIsUnmapped());
         }
     }
 
@@ -217,35 +215,31 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
     private static final class SVCustomReadFilter implements ReadFilter{
         private static final long serialVersionUID = 1L;
 
-        private final ReadFilter collapsedFilter;
+        private final ReadFilter combinedReadFilter;
 
-        public SVCustomReadFilter(final UseEnd whichEnd,
-                                  final boolean filterNonProperlyPairdReads,
-                                  final boolean filterUnmappedReads,
-                                  final boolean filterMateUnmappedReads,
-                                  final boolean filterDupReads,
+        public SVCustomReadFilter(final EndToUse whichEnd,
+                                  final boolean filterNonProperlyPairedReads,
+                                  final boolean filterDuplicatedReads,
                                   final boolean filterSecondaryAlignments,
                                   final boolean filterSupplementaryAlignments,
-                                  final int MQThreshold,
-                                  final int mMQThreshold){
+                                  final int     MQThreshold,
+                                  final int     mMQThreshold){
 
-            final UseEnd endVal = whichEnd;
+            final EndToUse endVal = whichEnd;
 
             ReadFilter tempFilter = read -> 0!=read.getFragmentLength();
                        tempFilter = tempFilter.and(read -> read.isPaired());
-                       tempFilter = tempFilter.and(read -> endVal == (read.isFirstOfPair() ? UseEnd.FIRST : UseEnd.SECOND));
+                       tempFilter = tempFilter.and(read -> endVal == (read.isFirstOfPair() ? EndToUse.FIRST : EndToUse.SECOND));
 
-            if(filterNonProperlyPairdReads)   { tempFilter = tempFilter.and(read -> read.isProperlyPaired());}
-            if(filterUnmappedReads)           { tempFilter = tempFilter.and(read -> !read.isUnmapped());}
-            if(filterMateUnmappedReads)       { tempFilter = tempFilter.and(read -> !read.mateIsUnmapped());}
-            if(filterDupReads)                { tempFilter = tempFilter.and(read -> !read.isDuplicate());}
+            if(filterNonProperlyPairedReads)  { tempFilter = tempFilter.and(read -> read.isProperlyPaired());}
+            if(filterDuplicatedReads)         { tempFilter = tempFilter.and(read -> !read.isDuplicate());}
             if(filterSecondaryAlignments)     { tempFilter = tempFilter.and(read -> !read.isSecondaryAlignment());}
             if(filterSupplementaryAlignments) { tempFilter = tempFilter.and(read -> !read.isSupplementaryAlignment());}
 
             if(0!=MQThreshold)  { tempFilter = tempFilter.and(read -> read.getMappingQuality() >= MQThreshold);}
             if(0!=mMQThreshold) { tempFilter = tempFilter.and(read -> read.getAttributeAsInteger("MQ") >= mMQThreshold);}
 
-            collapsedFilter = tempFilter;
+            combinedReadFilter = tempFilter;
 
             // TODO: pick only isReverseStrand/mateIsReverseStrand (strand bias)
             // TODO: filter based on {MATE_ON_SAME_CONTIG, MATE_DIFFERENT_STRAND, GOOD_CIGAR, NON_ZERO_REFERENCE_LENGTH_ALIGNMENT}
@@ -253,7 +247,7 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
 
         @Override
         public boolean test(final GATKRead read){
-            return collapsedFilter.test(read);
+            return combinedReadFilter.test(read);
         }
     }
 
@@ -264,7 +258,7 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
 
         collector.produceMetricsFile(metricsFile);
 
-        MetricsUtils.saveMetrics(metricsFile, OUTPUT, getAuthHolder());
+        MetricsUtils.saveMetrics(metricsFile, output, getAuthHolder());
 
         if (metricsFile.getAllHistograms().isEmpty()) {
             logger.warn("No valid reads found in input file.");
@@ -274,16 +268,17 @@ public final class CollectInsertSizeMetricsSpark extends GATKSparkTool {
     @VisibleForTesting
     void writeHistogramPDF(final String inputFileName){
 
-        if(0.0 == DEVIATIONS_TOL){
+        if(0.0 == maxMADTolerance){
             logger.warn("MAD tolerance for histogram set to 0, no plot to generate.");
+            return;
         }
 
-        final File histogramPlotPDF = new File(HISTOGRAM_PLOT_FILE);
+        final File histogramPlotPDF = new File(histogramPlotFile);
         IOUtil.assertFileIsWritable(histogramPlotPDF);
 
         final RScriptExecutor executor = new RScriptExecutor();
         executor.addScript(new Resource(R_SCRIPT, CollectInsertSizeMetricsSpark.class));
-        executor.addArgs(OUTPUT,                                // text-based metrics file
+        executor.addArgs(output,                                // text-based metrics file
                          histogramPlotPDF.getAbsolutePath(),    // PDF graphics file
                          inputFileName);                        // input bam file
         executor.exec();
