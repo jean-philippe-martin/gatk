@@ -98,6 +98,9 @@ public final class RecalibrationArgumentCollection implements ArgumentCollection
     @Argument(fullName = "preserve_qscores_less_than", shortName = "preserveQ", doc = "Don't recalibrate bases with quality scores less than this threshold (with -BQSR)", optional = true)
     public int PRESERVE_QSCORES_LESS_THAN = QualityUtils.MIN_USABLE_Q_SCORE;
 
+    @HiddenOption
+    @Argument(fullName = "skipBAQ", shortName = "skipBAQ", doc = "don't do BAQ correction")
+    public boolean skipBAQ = false;
 
     // --------------------------------------------------------------------------------------------------------------
     //

@@ -83,7 +83,11 @@ public final class BaseRecalibrationEngine implements Serializable {
         this.recalArgs = recalArgs;
         this.readsHeader = readsHeader;
 
-        baq = new BAQ(recalArgs.BAQGOP); // setup the BAQ object with the provided gap open penalty
+        if (recalArgs.skipBAQ) {
+            baq = null;
+        } else {
+            baq = new BAQ(recalArgs.BAQGOP); // setup the BAQ object with the provided gap open penalty
+        }
 
         covariates = new StandardCovariateList(recalArgs, readsHeader);
 
@@ -120,11 +124,16 @@ public final class BaseRecalibrationEngine implements Serializable {
         int[] isSNP = new int[read.getLength()];
         int[] isInsertion = new int[isSNP.length];
         int[] isDeletion = new int[isSNP.length];
-        final int nErrors = calculateIsSNPOrIndel(read, refDS, isSNP, isInsertion, isDeletion);
 
-        // note for efficiency regions we don't compute the BAQ array unless we actually have
-        // some error to marginalize over.  For ILMN data ~85% of reads have no error
-        final byte[] baqArray = nErrors == 0 ? flatBAQArray(read) : calculateBAQArray(read, refDS);
+        final byte[] baqArray;
+        if (recalArgs.skipBAQ){
+            baqArray = flatBAQArray(read);
+        } else {
+            final int nErrors = calculateIsSNPOrIndel(read, refDS, isSNP, isInsertion, isDeletion);
+            // note for efficiency regions we don't compute the BAQ array unless we actually have
+            // some error to marginalize over.  For ILMN data ~85% of reads have no error
+            baqArray = nErrors == 0 ? flatBAQArray(read) : calculateBAQArray(read, refDS);
+        }
 
         if( baqArray != null ) { // some reads just can't be BAQ'ed
             final ReadCovariates covariates = RecalUtils.computeCovariates(read, readsHeader, this.covariates, true, keyCache);
