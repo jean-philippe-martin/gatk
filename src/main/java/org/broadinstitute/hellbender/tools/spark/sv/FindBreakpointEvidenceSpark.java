@@ -13,6 +13,7 @@ import org.broadinstitute.hellbender.cmdline.programgroups.SparkProgramGroup;
 import org.broadinstitute.hellbender.engine.filters.ReadFilter;
 import org.broadinstitute.hellbender.engine.spark.GATKSparkTool;
 import org.broadinstitute.hellbender.exceptions.GATKException;
+import org.broadinstitute.hellbender.tools.spark.utils.HopscotchHashSet;
 import org.broadinstitute.hellbender.tools.spark.utils.MapPartitioner;
 import org.broadinstitute.hellbender.utils.gcs.BucketUtils;
 import org.broadinstitute.hellbender.utils.read.GATKRead;
@@ -148,6 +149,8 @@ public final class FindBreakpointEvidenceSpark extends GATKSparkTool {
 
         broadcastIntervals.destroy();
         metadata.destroy();
+
+        System.out.println("Hash set has size: "+new HopscotchHashSet<QNameAndInterval>(qNames).size());
     }
 
 /*
