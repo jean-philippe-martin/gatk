@@ -15,13 +15,14 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 public final class CollectInsertSizeMetricsSparkUnitTest extends CommandLineProgramTest{
 
     private static final File TEST_DATA_DIR = new File(getTestDataDir(), "picard/analysis/CollectInsertSizeMetrics");
     private static final double DOUBLE_TOLERANCE = 0.05;
-    private static List<InsertSizeMetrics> metricsList = new ArrayList<>();
 
     public String getTestedClassName() {
         return CollectInsertSizeMetricsSpark.class.getSimpleName();
@@ -76,16 +77,49 @@ public final class CollectInsertSizeMetricsSparkUnitTest extends CommandLineProg
 
         Assert.assertFalse(output.getMetrics().isEmpty());
 
-        metricsList = output.getMetrics();
+        List<InsertSizeMetrics> metricsList = new ArrayList<>( output.getMetrics() );
         Assert.assertEquals(metricsList.size(), 10);
+
+        // a comparator for sorting the metrics list by hierarchy and within the same level alphanumerically
+        final Comparator<InsertSizeMetrics> metricsMetaInfoComparator = new Comparator<InsertSizeMetrics>(){
+            @Override public int compare(final InsertSizeMetrics m1, final InsertSizeMetrics m2){
+
+                int b1  = (m1.SAMPLE != null) ?     0b100: 0;
+                    b1 += (m1.LIBRARY != null) ?    0b010: 0;
+                    b1 += (m1.READ_GROUP != null) ? 0b001: 0;
+
+                int b2  = (m2.SAMPLE != null) ?     0b100: 0;
+                    b2 += (m2.LIBRARY != null) ?    0b010: 0;
+                    b2 += (m2.READ_GROUP != null) ? 0b001: 0;
+
+                int result = 0;
+                if(b1!=b2){
+                    result = (b1 < b2) ? -1 : 1;
+                }else{ // note that both at All_reads level is impossible
+                    int i = m1.SAMPLE.compareToIgnoreCase(m2.SAMPLE);
+                    if(0b100==b1){ // both at sample level
+                        result = i;
+                    }else if(0b110==b1){ // both at library level
+                        result = (0!=i) ? i : m1.LIBRARY.compareToIgnoreCase(m2.LIBRARY);
+                    }else if(0b111==b1){ // both at read group level
+                        int j = m1.LIBRARY.compareToIgnoreCase(m2.LIBRARY);
+                        result = (0!=i) ? i : (0!=j ? j : m1.READ_GROUP.compareToIgnoreCase(m2.READ_GROUP));
+                    }
+                }
+                return result;
+            }
+        };
+        Collections.sort(metricsList, metricsMetaInfoComparator);
+//        metricsList.sort(metricsMetaInfoComparator);
 
         //                            SAMP       LIB             RG         OR    CNT   MIN     MAX     MED     MAD     MEAN   SD  RANGES
         testStats(metricsList.get(0), null,      null,           null,      "FR", 13,   36,     45,     41,     3,      40.1, 3.1, 1, 1, 1, 7, 7, 7, 9, 11, 11, 11);  // ALL_READS
+
         testStats(metricsList.get(1), "NA12878", null,           null,      "FR", 13,   36,     45,     41,     3,      40.1, 3.1, 1, 1, 1, 7, 7, 7, 9, 11, 11, 11);  // SAMPLE
 
         testStats(metricsList.get(2), "NA12878", "Solexa-41734", null,      "FR",  2,   36,     41,   38.5,   2.5,      38.5, 3.5, 5, 5, 5, 5, 5, 7, 7,  7,  7,  7);  // library 1
-        testStats(metricsList.get(3), "NA12878", "Solexa-41748", null,      "FR",  9,   36,     45,     40,     2,      39.6, 2.9, 1, 3, 3, 3, 5, 5, 9,  9, 11, 11);  // library 2
-        testStats(metricsList.get(4), "NA12878", "Solexa-41753", null,      "FR",  2,   44,     44,     44,     0,        44,   0, 1, 1, 1, 1, 1, 1, 1,  1,  1,  1);  // library 3
+        testStats(metricsList.get(3), "NA12878", "Solexa-41748", null,      "FR",  9,   36,     45,     40,     2,      39.6, 2.9, 1, 3, 3, 3, 5, 5, 9,  9, 11, 11);
+        testStats(metricsList.get(4), "NA12878", "Solexa-41753", null,      "FR",  2,   44,     44,     44,     0,        44,   0, 1, 1, 1, 1, 1, 1, 1,  1,  1,  1);
 
         testStats(metricsList.get(5), "NA12878", "Solexa-41734", "62A79.3", "FR",  1,   36,     36,     36,     0,        36,   0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);     // read groups
         testStats(metricsList.get(6), "NA12878", "Solexa-41734", "62A79.5", "FR",  1,   41,     41,     41,     0,        41,   0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
