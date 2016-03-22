@@ -189,11 +189,10 @@ public final class InsertSizeMetricsCollectorSparkUnitTest {
         Assert.assertEquals(filledHistogram.getMedianBinSize(), 2.0);
         Assert.assertEquals(filledHistogram.getMedianAbsoluteDeviation(), 3.0);
         Assert.assertEquals(filledHistogram.getSum(), 521.0);
-        Assert.assertEquals(filledHistogram.getSumOfValues(), 244.0);
         Assert.assertEquals(filledHistogram.getMode(), 41.0);
-        Assert.assertEquals(filledHistogram.getPercentile(10), 36.0);
-        Assert.assertEquals(filledHistogram.getPercentile(50), 40.0);
-        Assert.assertEquals(filledHistogram.getPercentile(90), 44.0);
+        Assert.assertEquals(filledHistogram.getPercentile(0.10), 36.0);
+        Assert.assertEquals(filledHistogram.getPercentile(0.50), 41.0);
+        Assert.assertEquals(filledHistogram.getPercentile(0.90), 44.0);
 
         Assert.assertEquals(filledMetrics.READ_GROUP, "readGroup");
         Assert.assertEquals(filledMetrics.LIBRARY, "library");
@@ -204,18 +203,18 @@ public final class InsertSizeMetricsCollectorSparkUnitTest {
         Assert.assertEquals(filledMetrics.MAX_INSERT_SIZE, 45);
         Assert.assertEquals(filledMetrics.MEAN_INSERT_SIZE, 40.1, 0.05);
         Assert.assertEquals(filledMetrics.STANDARD_DEVIATION, 3.1, 0.05);
-        Assert.assertEquals(filledMetrics.MEDIAN_INSERT_SIZE, 41);
-        Assert.assertEquals(filledMetrics.MEDIAN_ABSOLUTE_DEVIATION, 3);
+        Assert.assertEquals(filledMetrics.MEDIAN_INSERT_SIZE, 41.0);
+        Assert.assertEquals(filledMetrics.MEDIAN_ABSOLUTE_DEVIATION, 3.0);
 
-        Assert.assertEquals(metrics.WIDTH_OF_10_PERCENT, 1);
-        Assert.assertEquals(metrics.WIDTH_OF_20_PERCENT, 1);
-        Assert.assertEquals(metrics.WIDTH_OF_30_PERCENT, 1);
-        Assert.assertEquals(metrics.WIDTH_OF_40_PERCENT, 7);
-        Assert.assertEquals(metrics.WIDTH_OF_50_PERCENT, 7);
-        Assert.assertEquals(metrics.WIDTH_OF_60_PERCENT, 7);
-        Assert.assertEquals(metrics.WIDTH_OF_70_PERCENT, 9);
-        Assert.assertEquals(metrics.WIDTH_OF_80_PERCENT, 11);
-        Assert.assertEquals(metrics.WIDTH_OF_90_PERCENT, 11);
-        Assert.assertEquals(metrics.WIDTH_OF_99_PERCENT, 11);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_10_PERCENT, 1);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_20_PERCENT, 1);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_30_PERCENT, 1);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_40_PERCENT, 7);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_50_PERCENT, 7);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_60_PERCENT, 7);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_70_PERCENT, 9);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_80_PERCENT, 11);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_90_PERCENT, 11);
+        Assert.assertEquals(filledMetrics.WIDTH_OF_99_PERCENT, 11);
     }
 }
