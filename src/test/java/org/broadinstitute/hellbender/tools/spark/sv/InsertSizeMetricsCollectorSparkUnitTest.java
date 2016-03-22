@@ -179,21 +179,21 @@ public final class InsertSizeMetricsCollectorSparkUnitTest {
         final Histogram<Integer> filledHistogram = testHTSJDKHistogram.get(testGroup).get(SamPairUtil.PairOrientation.FR)._1();
         final InsertSizeMetrics filledMetrics = testHTSJDKHistogram.get(testGroup).get(SamPairUtil.PairOrientation.FR)._2();
 
-        Assert.assertEquals(filledHistogram.getMax(), 45);
-        Assert.assertEquals(filledHistogram.getMin(), 36);
-        Assert.assertEquals(filledHistogram.getCount(), 13);
+        Assert.assertEquals(filledHistogram.getMax(), 45.0);
+        Assert.assertEquals(filledHistogram.getMin(), 36.0);
+        Assert.assertEquals(filledHistogram.getCount(), 13.0);
         Assert.assertEquals(filledHistogram.getMean(), 40.1, 0.05);
         Assert.assertEquals(filledHistogram.getMeanBinSize(), 2.17, 0.05);
         Assert.assertEquals(filledHistogram.getStandardDeviation(), 3.1, 0.05);
-        Assert.assertEquals(filledHistogram.getMedian(), 41);
-        Assert.assertEquals(filledHistogram.getMedianBinSize(), 2);
-        Assert.assertEquals(filledHistogram.getMedianAbsoluteDeviation(), 3);
-        Assert.assertEquals(filledHistogram.getSum(), 521);
-        Assert.assertEquals(filledHistogram.getSumOfValues(), 244);
-        Assert.assertEquals(filledHistogram.getMode(), 41);
-        Assert.assertEquals(filledHistogram.getPercentile(10), 36);
-        Assert.assertEquals(filledHistogram.getPercentile(50), 40);
-        Assert.assertEquals(filledHistogram.getPercentile(90), 44);
+        Assert.assertEquals(filledHistogram.getMedian(), 41.0);
+        Assert.assertEquals(filledHistogram.getMedianBinSize(), 2.0);
+        Assert.assertEquals(filledHistogram.getMedianAbsoluteDeviation(), 3.0);
+        Assert.assertEquals(filledHistogram.getSum(), 521.0);
+        Assert.assertEquals(filledHistogram.getSumOfValues(), 244.0);
+        Assert.assertEquals(filledHistogram.getMode(), 41.0);
+        Assert.assertEquals(filledHistogram.getPercentile(10), 36.0);
+        Assert.assertEquals(filledHistogram.getPercentile(50), 40.0);
+        Assert.assertEquals(filledHistogram.getPercentile(90), 44.0);
 
         Assert.assertEquals(filledMetrics.READ_GROUP, "readGroup");
         Assert.assertEquals(filledMetrics.LIBRARY, "library");
