@@ -26,6 +26,8 @@ import de.undercouch.gradle.tasks.download.Download
 import org.gradle.internal.os.OperatingSystem
 
 mainClassName = "org.broadinstitute.hellbender.Main"
+
+//Note: the test suite must use the same defaults. If you change system properties in this list you must also update the one in the test task
 applicationDefaultJvmArgs = ["-Dsamjdk.use_async_io=true", "-Dsamjdk.intel_deflater_so_path=build/libIntelDeflater.so"]
 
 //Delete the windows script - we never test on Windows so let's not pretend it works
@@ -259,6 +261,9 @@ task testAll(type: Test){
     useTestNG{}
 
     systemProperty "gatk.spark.debug", System.getProperty("gatk.spark.debug")
+
+    systemProperty "samjdk.use_async_io", "true"
+    systemProperty "samjdk.intel_deflater_so_path", "build/libIntelDeflater.so"
 
     // set heap size for the test JVM(s)
     minHeapSize = "1G"
