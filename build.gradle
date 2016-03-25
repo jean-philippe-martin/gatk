@@ -257,31 +257,6 @@ jar {
 }
 
 
-task testAll(type: Test){
-    useTestNG{}
-
-    systemProperty "gatk.spark.debug", System.getProperty("gatk.spark.debug")
-
-    systemProperty "samjdk.use_async_io", "true"
-    systemProperty "samjdk.intel_deflater_so_path", "build/libIntelDeflater.so"
-
-    // set heap size for the test JVM(s)
-    minHeapSize = "1G"
-    maxHeapSize = "1.5G"
-    jvmArgs '-Xmx2G'
-
-    // show standard out and standard error of the test JVM(s) on the console
-    testLogging.showStandardStreams = true
-    beforeTest { descriptor ->
-        logger.lifecycle("Running Test: " + descriptor)
-    }
-
-    // listen to standard out and standard error of the test JVM(s)
-    onOutput { descriptor, event ->
-        logger.lifecycle("Test: " + descriptor + " produced standard out/err: " + event.message )
-    }
-}
-
 test {
     String CI = "$System.env.CI"
     String CLOUD = "$System.env.CLOUD"
@@ -307,6 +282,8 @@ test {
         }
     }
 
+    systemProperty "samjdk.use_async_io", "true"
+    systemProperty "samjdk.intel_deflater_so_path", "build/libIntelDeflater.so"
     systemProperty "gatk.spark.debug", System.getProperty("gatk.spark.debug")
 
     // set heap size for the test JVM(s)
