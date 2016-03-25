@@ -79,36 +79,6 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
     }
 
     /**
-     * Read a file of kmers to ignore.
-     * Each line must be exactly SVConstants.KMER_SIZE characters long, and must match [ACGT]*.
-     */
-    @VisibleForTesting static Set<SVKmer> readKmersToIgnore( final File kmersToIgnoreFile ) {
-        final Set<SVKmer> kmersToIgnore = new HashSet<>(SVUtils.hashMapCapacity((int)(kmersToIgnoreFile.length()/(SVConstants.KMER_SIZE+1))));
-
-        try ( final BufferedReader rdr = new BufferedReader(new FileReader(kmersToIgnoreFile)) ) {
-            String line;
-            while ( (line = rdr.readLine()) != null ) {
-                if ( line.length() != SVConstants.KMER_SIZE ) {
-                    throw new GATKException("SVKmer kill set contains a line of length " + line.length() +
-                            " but we were expecting K=" + SVConstants.KMER_SIZE);
-                }
-
-                final SVKmerizer kmerizer = new SVKmerizer(line, SVConstants.KMER_SIZE);
-                if ( !kmerizer.hasNext() ) {
-                    throw new GATKException("Unable to kmerize the kmer kill set string '" + line + "'.");
-                }
-
-                kmersToIgnore.add(kmerizer.next());
-            }
-        }
-        catch ( final IOException e ) {
-            throw new GATKException("Unable to read kmer kill set.", e);
-        }
-
-        return kmersToIgnore;
-    }
-
-    /**
      * Produce a map of SVKmer -> List of unique breakpoint IDs.
      * This is done by looking for reads that appear to be split, or for reads that are part of discordant pairs.
      * When a sufficient number of these reads are mapped onto reference near one another, those reads are taken
@@ -119,7 +89,7 @@ public class FindSVBreakpointsSpark extends GATKSparkTool {
      */
     private Map<SVKmer, List<Long>> findClusters( final JavaSparkContext ctx ) {
         // read the ignored kmer list
-        final Broadcast<Set<SVKmer>> kmersToIgnore = ctx.broadcast(readKmersToIgnore(new File(kmersToIgnoreFilename)));
+        final Broadcast<Set<SVKmer>> kmersToIgnore = ctx.broadcast(SVKmer.readKmersFile(new File(kmersToIgnoreFilename)));
 
         // produce a set of Breakpoint IDs for each of an interesting set of Kmers by...
         // 1) identifying putative breakpoints supported by a cluster of funky reads

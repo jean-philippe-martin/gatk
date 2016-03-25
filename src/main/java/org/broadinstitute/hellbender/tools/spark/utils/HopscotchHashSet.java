@@ -9,16 +9,17 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 
 /**
- * Immutable hash set.  Provides low memory overhead by using hopscotch hashing.
- * Provides a special iterator type to traverse hash buckets.
- * (This lets you implement a multi-map on this collection by using a <K,V>-ish element type.)
+ * Hash set that provides low memory overhead by using hopscotch hashing.
+ * Also provides a special iterator type to traverse individual hash buckets.
+ * (This lets you implement a multi-map on this collection by using a <K,V>-ish element type having a hashCode that
+ * depends only on K.)
  */
 public final class HopscotchHashSet<T> extends AbstractSet<T> implements Serializable {
     private static final long serialVersionUID = 1L;
-    private int size;
     private int capacity;
     // unused buckets contain null.  (this data structure does not support null entries.)
     // if the bucket is unused, the corresponding status byte is irrelevant, but is always set to 0.
+    private int size;
     private T[] buckets;
     // format of the status bytes:
     // high bit set indicates that the bucket contains "chain head" (i.e., an entry that naturally belongs in the
@@ -39,20 +40,18 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
             268435399, 379625047, 536870909, 759250111, 1073741789, 1518500213, 2147483647
     };
 
-    @VisibleForTesting HopscotchHashSet( final int capacity ) {
-        init(capacity);
+    @SuppressWarnings("unchecked")
+    public HopscotchHashSet( final int capacity ) {
+        this.capacity = computeCapacity(capacity);
+        this.size = 0;
+        // Not unsafe, because the remainder of the API allows only elements known to be T's to be assigned to buckets.
+        this.buckets = (T[])new Object[capacity];
+        this.status = new byte[capacity];
     }
 
-    /**
-     * Make a HashSet from the provided collection.  N.B.: Null entries are ignored.
-     */
-    public HopscotchHashSet( final Collection<T> entries ) {
-        init(computeCapacity(entries.size()));
-        if ( !insertAll(entries) ) {
-            init(bumpCapacity(capacity));
-            if ( !insertAll(entries) )
-                throw new IllegalStateException("Unable to build hashSet.  Maybe your hash function is screwy?");
-        }
+    public HopscotchHashSet( final Collection<T> collection ) {
+        this(collection.size());
+        addAll(collection);
     }
 
     @Override
@@ -73,18 +72,52 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
 
     public Iterator<T> bucketIterator( final int hashVal ) { return new BucketIterator(hashVal); }
 
-    private boolean insertAll( final Collection<T> entries ) {
+    @Override
+    public boolean add( final T entry ) {
+        if ( entry == null ) throw new UnsupportedOperationException("This collection cannot contain null.");
+        if ( size == capacity ) resize();
         try {
-            for ( final T entry : entries ) {
-                if ( entry != null ) insert(entry);
-            }
+            return insert(entry);
         } catch ( final IllegalStateException ise ) {
-            return false;
+            resize();
+            return insert(entry);
         }
-        return true;
     }
 
-    @VisibleForTesting boolean insert( final T entry ) {
+    @Override
+    public boolean remove( final Object entry ) {
+        if ( entry == null ) return false;
+        int bucketIndex = hashToIndex(entry.hashCode());
+        if ( buckets[bucketIndex] == null || !isChainHead(bucketIndex) ) return false;
+        while ( true ) {
+            final int offset = getOffset(bucketIndex);
+            if ( buckets[bucketIndex].equals(entry) ) {
+                if ( offset == 0 ) {
+                    buckets[bucketIndex] = null;
+                    status[bucketIndex] = 0;
+                } else {
+                    // move the item at the end of the chain into the hole we're creating by deleting this entry
+                    int prevIndex = bucketIndex;
+                    int offsetToNext = getOffset(prevIndex);
+                    int nextIndex = getIndex(prevIndex, offsetToNext);
+                    while ( (offsetToNext = getOffset(nextIndex)) != 0 ) {
+                        prevIndex = nextIndex;
+                        nextIndex = getIndex(nextIndex, offsetToNext);
+                    }
+                    buckets[bucketIndex] = buckets[nextIndex];
+                    buckets[nextIndex] = null;
+                    status[nextIndex] = 0;
+                    status[prevIndex] -= getOffset(prevIndex);
+                }
+                return true;
+            }
+            if ( offset == 0 ) break;
+            bucketIndex = getIndex(bucketIndex, offset);
+        }
+        return false;
+    }
+
+    private boolean insert( final T entry ) {
         final int bucketIndex = hashToIndex(entry.hashCode());
 
         // if there's a squatter where the new entry should go, move it elsewhere and put the entry there
@@ -188,7 +221,6 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
     }
 
     private int findEmptyBucket( int bucketIndex ) {
-        if ( size == capacity ) throw new IllegalStateException("HopscotchHashSet is full.");
         do {
             bucketIndex = getIndex(bucketIndex, 1);
         }
@@ -261,13 +293,14 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
     }
 
     @SuppressWarnings("unchecked")
-    private void init( final int capacity ) {
-        size = 0;
-        this.capacity = capacity;
-        // Not unsafe, because the remainder of the API allows only elements known to be T's to be assigned to buckets.
-        // In fact, except for the testing interface, this class is an immutable loaded by a collection of T's.
+    private void resize() {
+        final T[] oldBuckets = buckets;
+        capacity = bumpCapacity(capacity);
         buckets = (T[])new Object[capacity];
         status = new byte[capacity];
+        for ( final T entry : oldBuckets ) {
+            if ( entry != null ) insert(entry);
+        }
     }
 
     private static int computeCapacity( final int size ) {

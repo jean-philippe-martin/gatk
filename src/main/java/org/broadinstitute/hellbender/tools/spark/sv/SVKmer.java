@@ -1,15 +1,19 @@
 package org.broadinstitute.hellbender.tools.spark.sv;
 
+import org.broadinstitute.hellbender.exceptions.GATKException;
+import org.broadinstitute.hellbender.tools.spark.utils.HopscotchHashSet;
 import org.broadinstitute.hellbender.utils.BaseUtils;
 
-import java.io.Serializable;
+import java.io.*;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * An immutable SVKmer.
  * K must be between 1 and 63 (but it's silly to use this class for K < 33).
  * Canonicalization is unimplemented for even K.
  */
-public final class SVKmer implements Comparable<SVKmer>, Serializable {
+public class SVKmer implements Comparable<SVKmer>, Serializable {
     private static final long serialVersionUID = 1L;
 
     // these are treated as K-bit unsigned integers
@@ -46,6 +50,8 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
         valHigh = valLow = 0;
     }
 
+    public SVKmer( final SVKmer that ) { this.valHigh = that.valHigh; this.valLow = that.valLow; }
+
     private SVKmer( final long valHigh, final long valLow ) { this.valHigh = valHigh; this.valLow = valLow; }
 
     /**
@@ -53,7 +59,7 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
      * E.g., if kmer.toString(5) is "ACTGA", then kmer.successor(SVKmer.Base.C,5).toString(5) is "CTGAC".
      * @param base must be 0, 1, 2, or 3, corresponding to A, C, G, or T.
      */
-    public SVKmer successor( final Base base, final int kSize ) {
+    public final SVKmer successor( final Base base, final int kSize ) {
         // bit hack to make a long value with the kSize least significant bits set to 1
         final long mask = (1L << kSize) - 1L;
         // move all the bits up two places, OR in the top two bits from valLow at the bottom, and mask to kSize bits
@@ -68,7 +74,7 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
      * E.g., if kmer.toString(5) is "ACTGA", then kmer.predecessor(SVKmer.Base.T,5).toString(5) is "TACTG".
      * @param base must be 0, 1, 2, or 3, corresponding to A, C, G, or T.
      */
-    public SVKmer predecessor( final Base base, final int kSize ) {
+    public final SVKmer predecessor( final Base base, final int kSize ) {
         // bit hack to make a long value with the kSize least significant bits set to 1
         final long mask = (1L << kSize) - 1L;
         // move all the bits down two places, OR in the successor bits at the top, and mask to kSize bits
@@ -82,7 +88,7 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
      * Returns a new SVKmer that's the reverse-complement of this one.
      * E.g., if kmer.toString(5) is "ACTGA", then kmer.rc(5).toString(5) is "TCAGT".
      */
-    public SVKmer reverseComplement( final int kSize ) {
+    public final SVKmer reverseComplement( final int kSize ) {
         // bit hack to make a long value with the kSize least significant bits set to 1
         final long mask = (1L << kSize) - 1L;
         // number of unused bits at the top
@@ -108,7 +114,7 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
      * The reverse-complement of a non-canonical SVKmer is a canonical SVKmer, and vice versa.  (Think about it.)
      * Canonical form is not defined for even-K Kmers (too expensive to compute routinely).
      */
-    public SVKmer canonical( final int kSize ) {
+    public final SVKmer canonical( final int kSize ) {
         if ( (kSize & 1) == 0 ) throw new IllegalArgumentException("K must be odd to canonicalize.");
         // for odd-size kmers, the high bit of the middle base is in least significant position in valHigh.
         // test its value by ANDing with 1.  if it's zero the middle base is A or C and we're good to go.
@@ -122,19 +128,19 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
         return obj instanceof SVKmer && equals((SVKmer)obj);
     }
 
-    public boolean equals( final SVKmer that ) {
+    public final boolean equals( final SVKmer that ) {
         return this.valHigh == that.valHigh && this.valLow == that.valLow;
     }
 
     @Override
-    public int hashCode() { return (int)(valHigh ^ (valHigh >> 32) ^ valLow ^ (valLow >> 32)); }
+    public final int hashCode() { return (int)(valHigh ^ (valHigh >> 32) ^ valLow ^ (valLow >> 32)); }
 
     /**
      * SVKmer comparison is consistent with equals.
      * It's also the same as the lexicographic ordering you'd get using toString on the Kmers.
      */
     @Override
-    public int compareTo( final SVKmer that ) {
+    public final int compareTo( final SVKmer that ) {
         int result = Long.compare(this.valHigh, that.valHigh);
         if ( result == 0 ) result = Long.compare(this.valLow, that.valLow);
         return result;
@@ -143,7 +149,7 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
     /**
      * Not an override.  An SVKmer doesn't know what K is, so it has to be supplied.
      */
-    public String toString( final int kSize ) {
+    public final String toString( final int kSize ) {
         final StringBuilder sb = new StringBuilder(kSize);
 
         // we'll produce the string in reverse order and reverse it at the end
@@ -169,6 +175,36 @@ public final class SVKmer implements Comparable<SVKmer>, Serializable {
         }
         // we built the string in least-significant to most-significant bit order.  reverse it now.
         return sb.reverse().toString();
+    }
+
+    /**
+     * Read a file of kmers.
+     * Each line must be exactly SVConstants.KMER_SIZE characters long, and must match [ACGT]*.
+     */
+    public static Set<SVKmer> readKmersFile( final File kmersFile ) {
+        final Set<SVKmer> kmers = new HopscotchHashSet<>((int)(kmersFile.length()/(SVConstants.KMER_SIZE+1)));
+
+        try ( final BufferedReader rdr = new BufferedReader(new FileReader(kmersFile)) ) {
+            String line;
+            while ( (line = rdr.readLine()) != null ) {
+                if ( line.length() != SVConstants.KMER_SIZE ) {
+                    throw new GATKException("SVKmer kill set contains a line of length " + line.length() +
+                            " but we were expecting K=" + SVConstants.KMER_SIZE);
+                }
+
+                final SVKmerizer kmerizer = new SVKmerizer(line, SVConstants.KMER_SIZE);
+                if ( !kmerizer.hasNext() ) {
+                    throw new GATKException("Unable to kmerize the kmer kill set string '" + line + "'.");
+                }
+
+                kmers.add(kmerizer.next());
+            }
+        }
+        catch ( final IOException e ) {
+            throw new GATKException("Unable to read kmer kill set.", e);
+        }
+
+        return kmers;
     }
 
     private static long reverseComplementByteValueAsLong( final int bIn ) {
