@@ -53,6 +53,9 @@ before_install:
 #install gcc
 - sudo apt-get install -y --force-yes  gcc
 - gcc --version
+#test sga and bwa
+- which sga
+- which bwa
 install:
 - if [[ $TRAVIS_SECURE_ENV_VARS == false && $CLOUD == mandatory ]]; then
     echo "Can't run cloud tests without keys so don't bother building";
