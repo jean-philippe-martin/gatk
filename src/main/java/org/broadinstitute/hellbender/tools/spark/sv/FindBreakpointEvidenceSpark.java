@@ -500,6 +500,7 @@ public final class FindBreakpointEvidenceSpark extends GATKSparkTool {
     }
 
     private final static class KmerAndInterval extends SVKmer {
+        private static final long serialVersionUID = 1L;
         private final int intervalId;
 
         KmerAndInterval( final SVKmer kmer, final int intervalId ) {

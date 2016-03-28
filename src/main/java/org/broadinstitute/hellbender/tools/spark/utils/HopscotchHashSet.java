@@ -3,10 +3,7 @@ package org.broadinstitute.hellbender.tools.spark.utils;
 import com.google.common.annotations.VisibleForTesting;
 
 import java.io.Serializable;
-import java.util.AbstractSet;
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.NoSuchElementException;
+import java.util.*;
 
 /**
  * Hash set that provides low memory overhead by using hopscotch hashing.
@@ -45,8 +42,8 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
         this.capacity = computeCapacity(capacity);
         this.size = 0;
         // Not unsafe, because the remainder of the API allows only elements known to be T's to be assigned to buckets.
-        this.buckets = (T[])new Object[capacity];
-        this.status = new byte[capacity];
+        this.buckets = (T[])new Object[this.capacity];
+        this.status = new byte[this.capacity];
     }
 
     public HopscotchHashSet( final Collection<T> collection ) {
@@ -68,7 +65,7 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
     public int size() { return size; }
 
     @Override
-    public Iterator<T> iterator() { return new CompleteIterator<>(buckets); }
+    public Iterator<T> iterator() { return new CompleteIterator(); }
 
     public Iterator<T> bucketIterator( final int hashVal ) { return new BucketIterator(hashVal); }
 
@@ -89,32 +86,44 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
         if ( entry == null ) return false;
         int bucketIndex = hashToIndex(entry.hashCode());
         if ( buckets[bucketIndex] == null || !isChainHead(bucketIndex) ) return false;
+        int predecessorIndex = -1;
         while ( true ) {
             final int offset = getOffset(bucketIndex);
             if ( buckets[bucketIndex].equals(entry) ) {
                 if ( offset == 0 ) {
                     buckets[bucketIndex] = null;
                     status[bucketIndex] = 0;
+                    if ( predecessorIndex != -1 ) status[predecessorIndex] -= getOffset(predecessorIndex);
                 } else {
                     // move the item at the end of the chain into the hole we're creating by deleting this entry
                     int prevIndex = bucketIndex;
-                    int offsetToNext = getOffset(prevIndex);
-                    int nextIndex = getIndex(prevIndex, offsetToNext);
+                    int nextIndex = getIndex(prevIndex, offset);
+                    int offsetToNext;
                     while ( (offsetToNext = getOffset(nextIndex)) != 0 ) {
                         prevIndex = nextIndex;
                         nextIndex = getIndex(nextIndex, offsetToNext);
                     }
                     buckets[bucketIndex] = buckets[nextIndex];
                     buckets[nextIndex] = null;
-                    status[nextIndex] = 0;
                     status[prevIndex] -= getOffset(prevIndex);
                 }
+                size -= 1;
                 return true;
             }
             if ( offset == 0 ) break;
+            predecessorIndex = bucketIndex;
             bucketIndex = getIndex(bucketIndex, offset);
         }
         return false;
+    }
+
+    @Override
+    public void clear() {
+        for ( int idx = 0; idx != capacity; ++idx ) {
+            buckets[idx] = null;
+            status[idx] = 0;
+        }
+        size = 0;
     }
 
     private boolean insert( final T entry ) {
@@ -335,30 +344,31 @@ public final class HopscotchHashSet<T> extends AbstractSet<T> implements Seriali
         @Override public T next() {
             if ( bucketIndex == buckets.length ) throw new NoSuchElementException("HopscotchHashSet iterator is exhausted.");
             final T result = buckets[bucketIndex];
+            if ( result == null ) throw new IllegalStateException("Unexpected null value during iteration.");
             final int offset = getOffset(bucketIndex);
             bucketIndex = offset != 0 ? getIndex(bucketIndex, offset) : buckets.length;
             return result;
         }
     }
 
-    private static final class CompleteIterator<T> implements Iterator<T> {
-        private final T[] buckets;
+    private final class CompleteIterator implements Iterator<T> {
         private int bucketIndex;
+        private T lastEntry;
 
-        CompleteIterator( final T[] buckets ) { this.buckets = buckets; this.bucketIndex = findNext(0); }
+        CompleteIterator() { this.bucketIndex = findNext(capacity-1); }
 
-        @Override public boolean hasNext() { return bucketIndex != buckets.length; }
+        @Override public boolean hasNext() { return bucketIndex >= 0; }
 
         @Override public T next() {
-            if ( bucketIndex == buckets.length ) throw new NoSuchElementException("HopscotchHashSet iterator is exhausted.");
-            final T result = buckets[bucketIndex];
-            bucketIndex = findNext(bucketIndex + 1);
-            return result;
+            if ( bucketIndex < 0 ) throw new NoSuchElementException("HopscotchHashSet iterator is exhausted.");
+            lastEntry = buckets[bucketIndex];
+            bucketIndex = findNext(bucketIndex - 1);
+            return lastEntry;
         }
 
         private int findNext( int index ) {
-            while ( index < buckets.length && buckets[index] == null ) {
-                ++index;
+            while ( index >= 0 && buckets[index] == null ) {
+                index -= 1;
             }
             return index;
         }

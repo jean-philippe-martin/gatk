@@ -57,7 +57,7 @@ public class FindSVBreakpointsSparkUnitTest extends BaseTest {
         final File kmersFile = File.createTempFile("kmerKillList", "txt");
         kmersFile.deleteOnExit();
         FindBadGenomicKmersSpark.writeKmersToOutput(new FileOutputStream(kmersFile), badKmers);
-        final Set<SVKmer> kmerSet = FindSVBreakpointsSpark.readKmersToIgnore(kmersFile);
+        final Set<SVKmer> kmerSet = SVKmer.readKmersFile(kmersFile);
         if ( !kmersFile.delete() )
             throw new GATKException("Unable to delete file "+kmersFile);
         Assert.assertEquals(badKmers.size(), kmerSet.size());
