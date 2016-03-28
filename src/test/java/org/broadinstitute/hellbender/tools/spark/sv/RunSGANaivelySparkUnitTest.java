@@ -44,9 +44,9 @@ public class RunSGANaivelySparkUnitTest extends CommandLineProgramTest {
 
     @Test(groups="sv")
     public void programAvailabilityTest() {
-        Assert.assertEquals(RunSGANaivelySpark.checkIfProgramIsAvailableOnHost("sga"), 0);
-        Assert.assertEquals(RunSGANaivelySpark.checkIfProgramIsAvailableOnHost("bwa"), 0);
-        Assert.assertEquals(RunSGANaivelySpark.checkIfProgramIsAvailableOnHost("xya"), 1);
+        Assert.assertEquals(RunSGANaivelySpark.checkIfProgramIsAvailableOnHost("sga"), 1);
+        Assert.assertEquals(RunSGANaivelySpark.checkIfProgramIsAvailableOnHost("bwa"), 1);
+        Assert.assertEquals(RunSGANaivelySpark.checkIfProgramIsAvailableOnHost("bash"), 0);
     }
 
     // first test on one utility function that's used frequently: extract basename of a file without extension
